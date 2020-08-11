@@ -45,3 +45,6 @@ zlib
 
 # Debug files
 *.dSYM/
+
+# Visual Studio temporaries
+.vs

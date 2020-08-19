@@ -39,13 +39,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\JPEG_codec.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="src\mod_ahtse_fill.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\PNG_codec.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

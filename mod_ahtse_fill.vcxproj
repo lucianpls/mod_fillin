@@ -30,9 +30,7 @@
     <ClInclude Include="src\mod_ahtse_fill.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\JPEG_codec.cpp" />
     <ClCompile Include="src\mod_ahtse_fill.cpp" />
-    <ClCompile Include="src\PNG_codec.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{D492D510-C084-4D6C-978A-1E1F7F28AE3F}</ProjectGuid>
@@ -124,18 +122,19 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>\Apache24\include;jpeg;png;zlib</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>\Apache24\include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>\Apache24\lib;$(SolutionDir)$(Configuration)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libhttpd.lib;libapr-1.lib;libaprutil-1.lib;jpeg.lib;libpng.lib;zlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <IgnoreSpecificDefaultLibraries>libcmt</IgnoreSpecificDefaultLibraries>
+      <AdditionalDependencies>libhttpd.lib;libapr.lib;libahtse.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <IgnoreSpecificDefaultLibraries>
+      </IgnoreSpecificDefaultLibraries>
       <AdditionalOptions>/EXPORT:ahtse_fill_module,@1</AdditionalOptions>
     </Link>
     <PostBuildEvent>
-      <Command>copy /y $(OutDir)$(TargetName)$(TargetExt) \Apache24\modules</Command>
+      <Command>copy /y $(TargetPath) \Apache24\modules</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">

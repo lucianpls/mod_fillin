@@ -1,6 +1,5 @@
 MODULE = mod_ahtse_fill
-
-C_SRC = $(MODULE).cpp JPEG_codec.cpp PNG_codec.cpp
+C_SRC = $(MODULE).cpp
 FILES = $(C_SRC)
 OBJECTS = $(FILES:.cpp=.lo)
 
@@ -29,4 +28,3 @@ install : $(TARGET)
 
 clean   :
 	rm -rf .libs *.{o,lo,slo,la}
-

@@ -6,37 +6,58 @@
 * (C) Lucian Plesea 2017
 */
 
-// TODO: Everything
-
-#include "mod_ahtse_fill.h"
+#include <ahtse.h>
 // #include <apr_strings.h>
+#include <unordered_map>
 
-static void *create_dir_conf(apr_pool_t *p, char *path)
-{
-    ahtse_fill_conf *c = (ahtse_fill_conf *) apr_pcalloc(p, sizeof(ahtse_fill_conf));
-    c->doc_path = path;
+NS_AHTSE_USE
+using namespace std;
+
+extern module AP_MODULE_DECLARE_DATA ahtse_fill_module;
+
+#if defined(APLOG_USE_MODULE)
+APLOG_USE_MODULE(ahtse_fill);
+#endif
+
+// compressed tile is 1MB
+#define DEFAULT_INPUT_SIZE (1024 * 1024)
+
+struct afconf {
+    apr_array_header_t* arr_rxp;
+    // internal source path
+    char* source;
+    // source suffix
+    char* suffix;
+
+    apr_size_t max_input_size;
+    // Set this if only indirect use is allowed
+    int indirect;
+};
+
+// TODO: Move this to libahtse, remove from mod_convert also
+static unordered_map<const char*, img_fmt> formats = {
+    {"image/jpeg", IMG_JPEG},
+    {"image/png", IMG_PNG},
+    {"image / jpeg; zen=true", IMG_JPEG_ZEN}
+};
+
+static int handler(request_rec* r) {
+    return DECLINED;
+}
+
+static void *create_dir_conf(apr_pool_t *p, char *path) {
+    auto c = reinterpret_cast<afconf *>(apr_pcalloc(p, sizeof(afconf)));
     return c;
 }
 
 // Allow for one or more RegExp guard
 // One of them has to match if the request is to be considered
-static const char *set_regexp(cmd_parms *cmd, ahtse_fill_conf *c, const char *pattern)
-{
-    char *err_message = NULL;
-    if (c->arxp == 0)
-        c->arxp = apr_array_make(cmd->pool, 2, sizeof(ap_regex_t *));
-    ap_regex_t **m = (ap_regex_t **)apr_array_push(c->arxp);
-    *m = ap_pregcomp(cmd->pool, pattern, 0);
-    return (NULL != *m) ? NULL : "Bad regular expression";
+static const char *set_regexp(cmd_parms *cmd, afconf *c, const char *pattern) {
+    return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
 }
 
-static const char *read_config(cmd_parms *cmd, ahtse_fill_conf *c, const char *src, const char *fname)
-{
+static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, const char *fname) {
     return "UNIMPLEMENTED";
-}
-
-static void register_hooks(apr_pool_t *p) {
-//    ap_hook_handler(handler, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
 static const command_rec cmds[] =
@@ -59,6 +80,10 @@ static const command_rec cmds[] =
 
     { NULL }
 };
+
+static void register_hooks(apr_pool_t *p) {
+    ap_hook_handler(handler, NULL, NULL, APR_HOOK_MIDDLE);
+}
 
 module AP_MODULE_DECLARE_DATA ahtse_fill_module = {
     STANDARD20_MODULE_STUFF,

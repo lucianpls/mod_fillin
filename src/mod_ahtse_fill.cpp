@@ -7,7 +7,9 @@
 */
 
 #include <ahtse.h>
-// #include <apr_strings.h>
+#include <receive_context.h>
+#include <http_request.h>
+#include <http_log.h>
 #include <unordered_map>
 
 NS_AHTSE_USE
@@ -29,6 +31,8 @@ struct afconf {
     // source suffix
     char* suffix;
 
+    TiledRaster raster, inraster;
+
     apr_size_t max_input_size;
     // Set this if only indirect use is allowed
     int indirect;
@@ -41,8 +45,59 @@ static unordered_map<const char*, img_fmt> formats = {
     {"image / jpeg; zen=true", IMG_JPEG_ZEN}
 };
 
+static const string normalizeETag(const char* sETag) {
+    string result(sETag);
+    static const char *base32chars = "0123456789abcdefghijklmnopqrstuvABCDEFGHIJKLMNOPQRSTUV";
+    while (string::npos != result.find_first_not_of(base32chars))
+        result.erase(result.find_first_not_of(base32chars), 1);
+    while (result.size() != 13)
+        result.append("0");
+    return result;
+}
+
 static int handler(request_rec* r) {
-    return DECLINED;
+    if (r->method_number != M_GET)
+        return DECLINED;
+
+    // The configuration always exists, but still
+    auto cfg = get_conf<afconf>(r, &ahtse_fill_module);
+    if (!cfg || !cfg->source || (cfg->indirect && r->main == nullptr))
+        return DECLINED;
+    if (!cfg->arr_rxp || !requestMatches(r, cfg->arr_rxp))
+        return DECLINED;
+
+    sz tile;
+    if (APR_SUCCESS != getMLRC(r, tile) || tile.l >= cfg->raster.n_levels)
+        return HTTP_BAD_REQUEST;
+
+    string ETag;
+    storage_manager tilebuf;
+    tilebuf.size = cfg->max_input_size;
+    tilebuf.buffer = static_cast<char*>(apr_palloc(r->pool, tilebuf.size));
+    if (!tilebuf.buffer) {
+        ap_log_rerror(APLOG_MARK, APLOG_CRIT, 0, r, "Error allocating memory for input tile");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    int code = APR_SUCCESS;
+    if (tile.l < cfg->inraster.n_levels) {
+        // Try fetching this input tile
+        char* sETag = NULL;
+        code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
+        if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
+            return code;
+        if (sETag)
+            ETag = normalizeETag(sETag);
+    }
+
+    // If the input was fine and the etag is not the missing tile, return the image as is
+    if (code == APR_SUCCESS && ETag != cfg->inraster.missing.eTag) {
+        apr_table_setn(r->headers_out, "ETag", ETag.c_str());
+        return sendImage(r, tilebuf);
+    }
+
+    // response was HTTP_NOT_FOUND or it was the missing tile which we ignore, this is where we fill in the tile
+    return HTTP_NOT_IMPLEMENTED;
 }
 
 static void *create_dir_conf(apr_pool_t *p, char *path) {
@@ -57,11 +112,48 @@ static const char *set_regexp(cmd_parms *cmd, afconf *c, const char *pattern) {
 }
 
 static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, const char *fname) {
-    return "UNIMPLEMENTED";
+    const char* err_message;
+    const char* line; // temporary
+
+    apr_table_t* kvp = readAHTSEConfig(cmd->temp_pool, src, &err_message);
+    if (nullptr == kvp)
+        return err_message;
+
+    err_message = configRaster(cmd->pool, kvp, c->inraster);
+    if (nullptr != err_message)
+        return err_message;
+
+    // We don't really need an output configuration, but we'll take one
+    kvp = readAHTSEConfig(cmd->temp_pool, fname, &err_message);
+    if (nullptr == kvp)
+        return err_message;
+    
+    err_message = configRaster(cmd->pool, kvp, c->raster);
+    if (nullptr != err_message)
+        return err_message;
+
+
+    line = apr_table_get(kvp, "InputBufferSize");
+    c->max_input_size = line ? static_cast<apr_size_t>(apr_strtoi64(line, NULL, 0))
+        : DEFAULT_INPUT_SIZE;
+
+    // Verify that rasters match
+    if (c->raster.pagesize != c->inraster.pagesize)
+        return "PageSize values should be identical";
+
+    return nullptr;
 }
 
 static const command_rec cmds[] =
 {
+    AP_INIT_TAKE12(
+        "Fill_Source",
+        (cmd_func) set_source<afconf>,
+        0,
+        ACCESS_CONF,
+        "Required, internal path for the source. Optional suffix also accepted"
+    ),
+
     AP_INIT_TAKE2(
         "Fill_ConfigurationFiles",
         (cmd_func)read_config, // Callback

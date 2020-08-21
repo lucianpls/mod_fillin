@@ -70,6 +70,14 @@ static int handler(request_rec* r) {
     if (APR_SUCCESS != getMLRC(r, tile) || tile.l >= cfg->raster.n_levels)
         return HTTP_BAD_REQUEST;
 
+    if (tile.l < 0)
+        return sendEmptyTile(r, cfg->raster.missing);
+
+    // Check outside of bounds
+    rset* level = cfg->raster.rsets + tile.l;
+    if (tile.x < 0 || tile.y < 0 || tile.x >= level->w || tile.y >= level->h )
+        return HTTP_BAD_REQUEST;
+
     string ETag;
     storage_manager tilebuf;
     tilebuf.size = cfg->max_input_size;
@@ -80,9 +88,9 @@ static int handler(request_rec* r) {
     }
 
     int code = APR_SUCCESS;
-    if (tile.l < cfg->inraster.n_levels) {
+    if (tile.l < cfg->inraster.n_levels ) {
         // Try fetching this input tile
-        char* sETag = NULL;
+        char* sETag = nullptr;
         code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
         if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
             return code;
@@ -96,7 +104,35 @@ static int handler(request_rec* r) {
         return sendImage(r, tilebuf);
     }
 
-    // response was HTTP_NOT_FOUND or it was the missing tile which we ignore, this is where we fill in the tile
+    // response was HTTP_NOT_FOUND or it was the missing tile
+    // Request a lower level from this exact path and oversample
+    sz higher_tile = tile;
+    higher_tile.l--;
+    higher_tile.x /= 2;
+    higher_tile.y /= 2;
+    if (higher_tile.l < 0)
+        return sendEmptyTile(r, cfg->raster.missing);
+
+    string new_uri(r->unparsed_uri);
+    auto sloc = new_uri.find("/tile/");
+    if (string::npos == sloc) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Configuration problem, tile path should end with /tile/");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    new_uri = pMLRC(r->pool, new_uri.substr(0, sloc).c_str(), higher_tile);
+    if (r->args && 0 != strlen(r->args)) {
+        new_uri.append("?");
+        new_uri.append(r->args);
+    }
+
+    {
+        char* sETag = nullptr;
+        tilebuf.size = cfg->max_input_size;
+        code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
+        if (APR_SUCCESS != code)
+            return code;
+        return sendImage(r, tilebuf);
+    }
     return HTTP_NOT_IMPLEMENTED;
 }
 
@@ -141,6 +177,7 @@ static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, cons
     if (c->raster.pagesize != c->inraster.pagesize)
         return "PageSize values should be identical";
 
+    // TODO: verify that sizes are powers of two, maybe even the bounding box
     return nullptr;
 }
 

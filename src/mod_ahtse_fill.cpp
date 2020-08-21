@@ -11,6 +11,7 @@
 #include <http_request.h>
 #include <http_log.h>
 #include <unordered_map>
+#include <apr_md5.h>
 
 NS_AHTSE_USE
 using namespace std;
@@ -55,6 +56,20 @@ static const string normalizeETag(const char* sETag) {
     return result;
 }
 
+// Upsample by a factor of 2 one of the corners of the source page 
+template <typename T>
+static void oversample(T* src, T* dst, const TiledRaster &raster, bool left, bool top) {
+    int colors = raster.pagesize.c;
+    int line_size = colors * raster.pagesize.x;
+    for (int y = 0; y < raster.pagesize.y; y++) {
+        for (int x = 0; x < raster.pagesize.x; x++) {
+            for (int c = 0; c < colors; c++) {
+                dst[y * line_size + x * colors + c] = src[y * line_size + x * colors + c];
+            }
+        }
+    }
+}
+
 static int handler(request_rec* r) {
     if (r->method_number != M_GET)
         return DECLINED;
@@ -88,9 +103,9 @@ static int handler(request_rec* r) {
     }
 
     int code = APR_SUCCESS;
+    char* sETag = nullptr;
     if (tile.l < cfg->inraster.n_levels ) {
         // Try fetching this input tile
-        char* sETag = nullptr;
         code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
         if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
             return code;
@@ -125,15 +140,72 @@ static int handler(request_rec* r) {
         new_uri.append(r->args);
     }
 
-    {
-        char* sETag = nullptr;
-        tilebuf.size = cfg->max_input_size;
-        code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
-        if (APR_SUCCESS != code)
-            return code;
-        return sendImage(r, tilebuf);
+    sETag = nullptr;
+    tilebuf.size = cfg->max_input_size;
+    code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
+    if (APR_SUCCESS != code)
+        return code;
+    if (tilebuf.size < 4) // Should be minimum image size, 4 is too small
+        return HTTP_NOT_FOUND;
+
+    // decode, oversample and re-encode
+    codec_params params;
+    memset(&params, 0, sizeof(params));
+    size_t pixel_size = GDTGetSize(cfg->inraster.datatype);
+    size_t input_line_width = pixel_size * 
+        cfg->inraster.pagesize.x * cfg->inraster.pagesize.c;
+    size_t pagesize = input_line_width * cfg->inraster.pagesize.y;
+    params.line_stride = input_line_width;
+
+    apr_uint32_t in_format;
+    memcpy(&in_format, tilebuf.buffer, 4);
+
+    const char* message = nullptr;
+
+    // Double page, to hold the upsampled one also
+    char* rawbuf = reinterpret_cast<char *>(apr_palloc(r->pool, 2 * pagesize));
+    if (JPEG_SIG == in_format) {
+        message = jpeg_stride_decode(params, cfg->inraster, tilebuf, rawbuf);
     }
-    return HTTP_NOT_IMPLEMENTED;
+    else {
+        message = "Unsupported input format";
+    }
+
+    if (message) { // Got an error from decoding
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decoding %s", message, new_uri.c_str());
+        return HTTP_NOT_FOUND;
+    }
+
+    // Got the bits, oversample the right corner
+    oversample(rawbuf, rawbuf + pagesize, cfg->inraster,
+        higher_tile.x * 2 == tile.x, 
+        higher_tile.y * 2 == tile.y);
+
+    // Build output tile in the tilebuf
+    jpeg_params cparams;
+    memset(&cparams, 0, sizeof(jpeg_params));
+    cparams.line_stride = input_line_width;
+    cparams.quality = 75;
+
+    storage_manager rawmgr(rawbuf + pagesize, pagesize);
+    tilebuf.size = cfg->max_input_size; // Reset the image buffer
+    message = jpeg_encode(cparams, cfg->raster, rawmgr, tilebuf);
+    if (message) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s encoding %s", message, new_uri.c_str());
+        return HTTP_NOT_FOUND;
+    }
+
+    unsigned char MDSIG[APR_MD5_DIGESTSIZE];
+    apr_md5(MDSIG, tilebuf.buffer, tilebuf.size);
+    apr_uint64_t val;
+    memcpy(&val, MDSIG, sizeof(val));
+    // Quotes are part of the syntax
+    char outETag[14];
+    tobase32(val, outETag);
+    if (etagMatches(r, outETag))
+        return HTTP_NOT_MODIFIED;
+    apr_table_set(r->headers_out, "ETag", outETag);
+    return sendImage(r, tilebuf);
 }
 
 static void *create_dir_conf(apr_pool_t *p, char *path) {

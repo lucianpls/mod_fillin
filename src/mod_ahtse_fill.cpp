@@ -12,6 +12,7 @@
 #include <http_log.h>
 #include <unordered_map>
 #include <apr_md5.h>
+#include <vector>
 
 NS_AHTSE_USE
 using namespace std;
@@ -35,6 +36,10 @@ struct afconf {
     TiledRaster raster, inraster;
 
     apr_size_t max_input_size;
+    int nearest;  // Defaults to blurred
+    int quality;  // Defaults to 75
+    int strength; // Defaults to 5
+
     // Set this if only indirect use is allowed
     int indirect;
 };
@@ -58,14 +63,69 @@ static const string normalizeETag(const char* sETag) {
 
 // Upsample by a factor of 2 one of the corners of the source page 
 template <typename T>
-static void oversample(T* src, T* dst, const TiledRaster &raster, bool left, bool top) {
-    int colors = raster.pagesize.c;
-    int line_size = colors * raster.pagesize.x;
-    for (int y = 0; y < raster.pagesize.y; y++) {
-        for (int x = 0; x < raster.pagesize.x; x++) {
-            for (int c = 0; c < colors; c++) {
-                dst[y * line_size + x * colors + c] = src[y * line_size + x * colors + c];
-            }
+static void oversample_NNB(T* src, T* dst, const TiledRaster &raster, int right, int bottom) {
+    // Normalize
+    right = right ? 1 : 0;
+    bottom = bottom ? 1 : 0;
+    size_t colors = raster.pagesize.c;
+    size_t szx = raster.pagesize.x;
+    size_t szy = raster.pagesize.y;
+    size_t szl = colors * szx;
+    size_t off = (right * szx / 2 + bottom * szy / 2) * szl;
+    for (int y = 0; y < szy; y++)
+        for (int x = 0; x < szx; x++)
+            for (int c = 0; c < colors; c++)
+                dst[y * szl + x * colors + c] =
+                src[off + (y / 2) * szl + (x / 2) * colors + c];
+}
+
+// Should take a work-type for the math part
+template <typename T>
+static void blur(vector<T>& line, vector<T>& acc, int strength) {
+    acc.clear();
+    strength = 10 - strength;
+    // Leave the ends as they are, blur the middle parts
+    acc.push_back(line[0]);
+    for (int i = 1; i < line.size() - 1 ; i++) {
+        auto v = static_cast<int64_t>(line[i]) * strength + line[i + 1] + line[i - 1];
+        acc.push_back(static_cast<T>(v / (strength + 2)));
+    }
+    acc.push_back(line.back());
+    // Copy accumulator back to the input
+    line.assign(acc.begin(), acc.end());
+}
+
+// Default overample, use nearest sampling, then blur it a bit
+template <typename T>
+static void oversample(T* src, T* dst, const TiledRaster& raster, int right, int bottom, int strength = 4) {
+    oversample_NNB(src, dst, raster, right, bottom);
+    size_t colors = raster.pagesize.c;
+    size_t szx = raster.pagesize.x;
+    size_t szy = raster.pagesize.y;
+    size_t szl = colors * szx;
+    // Blur by line then by column
+    vector<T> acc;
+    vector<T> values;
+    for (int c = 0; c < colors; c++) {
+        for (int y = 0; y < szy; y++) {
+            values.clear();
+            T* start = dst + y * szl + c;
+            for (int x = 0; x < szx; x++)
+                values.push_back(start[x * colors]);
+            blur(values, acc, strength);
+            for (int x = 0; x < szx; x++)
+                start[x * colors] = values[x];
+        }
+    }
+    for (int c = 0; c < colors; c++) {
+        for (int x = 0; x < szx; x++) {
+            values.clear();
+            T* start = dst + x * colors + c;
+            for (int y = 0; y < szy; y++)
+                values.push_back(start[y * szl]);
+            blur(values, acc, strength);
+            for (int y = 0; y < szy; y++)
+                start[y * szl] = values[y];
         }
     }
 }
@@ -95,7 +155,7 @@ static int handler(request_rec* r) {
 
     string ETag;
     storage_manager tilebuf;
-    tilebuf.size = cfg->max_input_size;
+    tilebuf.size = static_cast<int>(cfg->max_input_size);
     tilebuf.buffer = static_cast<char*>(apr_palloc(r->pool, tilebuf.size));
     if (!tilebuf.buffer) {
         ap_log_rerror(APLOG_MARK, APLOG_CRIT, 0, r, "Error allocating memory for input tile");
@@ -141,7 +201,7 @@ static int handler(request_rec* r) {
     }
 
     sETag = nullptr;
-    tilebuf.size = cfg->max_input_size;
+    tilebuf.size = static_cast<int>(cfg->max_input_size);
     code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
     if (APR_SUCCESS != code)
         return code;
@@ -155,7 +215,7 @@ static int handler(request_rec* r) {
     size_t input_line_width = pixel_size * 
         cfg->inraster.pagesize.x * cfg->inraster.pagesize.c;
     size_t pagesize = input_line_width * cfg->inraster.pagesize.y;
-    params.line_stride = input_line_width;
+    params.line_stride = static_cast<apr_uint32_t>(input_line_width);
 
     apr_uint32_t in_format;
     memcpy(&in_format, tilebuf.buffer, 4);
@@ -163,12 +223,12 @@ static int handler(request_rec* r) {
     const char* message = nullptr;
 
     // Double page, to hold the upsampled one also
-    char* rawbuf = reinterpret_cast<char *>(apr_palloc(r->pool, 2 * pagesize));
+    auto rawbuf = reinterpret_cast<unsigned char *>(apr_palloc(r->pool, 2 * pagesize));
     if (JPEG_SIG == in_format) {
         message = jpeg_stride_decode(params, cfg->inraster, tilebuf, rawbuf);
     }
     else {
-        message = "Unsupported input format";
+        message = "Only JPEG is supported at this time";
     }
 
     if (message) { // Got an error from decoding
@@ -177,18 +237,21 @@ static int handler(request_rec* r) {
     }
 
     // Got the bits, oversample the right corner
-    oversample(rawbuf, rawbuf + pagesize, cfg->inraster,
-        higher_tile.x * 2 == tile.x, 
-        higher_tile.y * 2 == tile.y);
+    bool right = (higher_tile.x * 2 != tile.x);
+    bool bottom = (higher_tile.y * 2 != tile.y);
+    if (cfg->nearest)
+        oversample_NNB(rawbuf, rawbuf + pagesize, cfg->inraster, right, bottom);
+    else
+        oversample(rawbuf, rawbuf + pagesize, cfg->inraster, right, bottom, 0);
 
     // Build output tile in the tilebuf
     jpeg_params cparams;
     memset(&cparams, 0, sizeof(jpeg_params));
-    cparams.line_stride = input_line_width;
-    cparams.quality = 75;
+    cparams.line_stride = static_cast<apr_uint32_t>(input_line_width);
+    cparams.quality = cfg->quality;
 
     storage_manager rawmgr(rawbuf + pagesize, pagesize);
-    tilebuf.size = cfg->max_input_size; // Reset the image buffer
+    tilebuf.size = static_cast<int>(cfg->max_input_size); // Reset the image buffer
     message = jpeg_encode(cparams, cfg->raster, rawmgr, tilebuf);
     if (message) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s encoding %s", message, new_uri.c_str());
@@ -244,6 +307,25 @@ static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, cons
     line = apr_table_get(kvp, "InputBufferSize");
     c->max_input_size = line ? static_cast<apr_size_t>(apr_strtoi64(line, NULL, 0))
         : DEFAULT_INPUT_SIZE;
+
+    line = apr_table_get(kvp, "Nearest");
+    if (line)
+        c->nearest = getBool(line);
+
+    c->strength = 5;
+    line = apr_table_get(kvp, "BlurStrength");
+    if (line)
+        c->strength = apr_atoi64(line);
+    if (c->strength > 10 || c->strength < 0)
+        return "BlurStrength range is 0 to 10";
+
+    c->quality = 75; // Default
+    line = apr_table_get(kvp, "Quality");
+    if (line) {
+        c->quality = apr_atoi64(line);
+        if (c->quality > 99 || c->quality < 0)
+            return "Quality range is 0 to 99";
+    }
 
     // Verify that rasters match
     if (c->raster.pagesize != c->inraster.pagesize)

@@ -103,28 +103,29 @@ static void oversample(T* src, T* dst, const TiledRaster& raster, int right, int
     size_t szx = raster.pagesize.x;
     size_t szy = raster.pagesize.y;
     size_t szl = colors * szx;
-    // Blur by line then by column
+    // Blur by line
     vector<T> acc;
     vector<T> values;
-    for (int c = 0; c < colors; c++) {
-        for (int y = 0; y < szy; y++) {
+    for (size_t c = 0; c < colors; c++) {
+        for (size_t y = 0; y < szy; y++) {
             values.clear();
             T* start = dst + y * szl + c;
-            for (int x = 0; x < szx; x++)
+            for (size_t x = 0; x < szx; x++)
                 values.push_back(start[x * colors]);
             blur(values, acc, strength);
-            for (int x = 0; x < szx; x++)
+            for (size_t x = 0; x < szx; x++)
                 start[x * colors] = values[x];
         }
     }
-    for (int c = 0; c < colors; c++) {
-        for (int x = 0; x < szx; x++) {
+    // Blur by column
+    for (size_t c = 0; c < colors; c++) {
+        for (size_t x = 0; x < szx; x++) {
             values.clear();
             T* start = dst + x * colors + c;
-            for (int y = 0; y < szy; y++)
+            for (size_t y = 0; y < szy; y++)
                 values.push_back(start[y * szl]);
             blur(values, acc, strength);
-            for (int y = 0; y < szy; y++)
+            for (size_t y = 0; y < szy; y++)
                 start[y * szl] = values[y];
         }
     }

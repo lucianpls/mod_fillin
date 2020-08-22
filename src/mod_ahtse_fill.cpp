@@ -72,9 +72,9 @@ static void oversample_NNB(T* src, T* dst, const TiledRaster &raster, int right,
     size_t szy = raster.pagesize.y;
     size_t szl = colors * szx;
     size_t off = (right * szx / 2 + bottom * szy / 2) * szl;
-    for (int y = 0; y < szy; y++)
-        for (int x = 0; x < szx; x++)
-            for (int c = 0; c < colors; c++)
+    for (size_t y = 0; y < szy; y++)
+        for (size_t x = 0; x < szx; x++)
+            for (size_t c = 0; c < colors; c++)
                 dst[y * szl + x * colors + c] =
                 src[off + (y / 2) * szl + (x / 2) * colors + c];
 }

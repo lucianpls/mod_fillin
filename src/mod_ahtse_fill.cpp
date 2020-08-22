@@ -86,7 +86,7 @@ static void blur(vector<T>& line, vector<T>& acc, int strength) {
     strength = 10 - strength;
     // Leave the ends as they are, blur the middle parts
     acc.push_back(line[0]);
-    for (int i = 1; i < line.size() - 1 ; i++) {
+    for (size_t i = 1; i < line.size() - 1 ; i++) {
         auto v = static_cast<int64_t>(line[i]) * strength + line[i + 1] + line[i - 1];
         acc.push_back(static_cast<T>(v / (strength + 2)));
     }

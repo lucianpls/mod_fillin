@@ -26,7 +26,6 @@
     <None Include="src\Makefile.lcl.example" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\common.h" />
     <ClInclude Include="src\mod_ahtse_fill.h" />
   </ItemGroup>
   <ItemGroup>

@@ -316,14 +316,14 @@ static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, cons
     c->strength = 5;
     line = apr_table_get(kvp, "BlurStrength");
     if (line)
-        c->strength = apr_atoi64(line);
+        c->strength = static_cast<int>(apr_atoi64(line));
     if (c->strength > 10 || c->strength < 0)
         return "BlurStrength range is 0 to 10";
 
     c->quality = 75; // Default
     line = apr_table_get(kvp, "Quality");
     if (line) {
-        c->quality = apr_atoi64(line);
+        c->quality = static_cast<int>(apr_atoi64(line));
         if (c->quality > 99 || c->quality < 0)
             return "Quality range is 0 to 99";
     }

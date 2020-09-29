@@ -6,7 +6,7 @@ be a sparse tile service. Missing tiles are recognized either by the
 HTTP Not Available (404) error, or by matching the source ETag.  
 
 ## Limitatons
-Currently only 8 bit JPEG input and output are supported.
+Only 8 bit JPEG input and output are currently supported
 
 Apache configuration directives, all three are required:
 

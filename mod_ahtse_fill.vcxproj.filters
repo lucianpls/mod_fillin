@@ -31,11 +31,6 @@
     </None>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\mod_ahtse_fill.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="src\mod_ahtse_fill.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

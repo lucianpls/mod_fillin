@@ -26,9 +26,6 @@
     <None Include="src\Makefile.lcl.example" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\mod_ahtse_fill.h" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="src\mod_ahtse_fill.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

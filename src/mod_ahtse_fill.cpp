@@ -45,10 +45,9 @@ struct afconf {
 };
 
 // TODO: Move this to libahtse, remove from mod_convert also
-static unordered_map<const char*, img_fmt> formats = {
+static unordered_map<const char*, IMG_T> formats = {
     {"image/jpeg", IMG_JPEG},
-    {"image/png", IMG_PNG},
-    {"image / jpeg; zen=true", IMG_JPEG_ZEN}
+    {"image/png", IMG_PNG}
 };
 
 static const string normalizeETag(const char* sETag) {
@@ -225,13 +224,7 @@ static int handler(request_rec* r) {
 
     // Double page, to hold the upsampled one also
     auto rawbuf = reinterpret_cast<unsigned char *>(apr_palloc(r->pool, 2 * pagesize));
-    if (JPEG_SIG == in_format) {
-        message = jpeg_stride_decode(params, cfg->inraster, tilebuf, rawbuf);
-    }
-    else {
-        message = "Only JPEG is supported at this time";
-    }
-
+    message = stride_decode(params, tilebuf, rawbuf);
     if (message) { // Got an error from decoding
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decoding %s", message, new_uri.c_str());
         return HTTP_NOT_FOUND;
@@ -253,7 +246,7 @@ static int handler(request_rec* r) {
 
     storage_manager rawmgr(rawbuf + pagesize, pagesize);
     tilebuf.size = static_cast<int>(cfg->max_input_size); // Reset the image buffer
-    message = jpeg_encode(cparams, cfg->raster, rawmgr, tilebuf);
+    message = jpeg_encode(cparams, rawmgr, tilebuf);
     if (message) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s encoding %s", message, new_uri.c_str());
         return HTTP_NOT_FOUND;
@@ -275,12 +268,6 @@ static int handler(request_rec* r) {
 static void *create_dir_conf(apr_pool_t *p, char *path) {
     auto c = reinterpret_cast<afconf *>(apr_pcalloc(p, sizeof(afconf)));
     return c;
-}
-
-// Allow for one or more RegExp guard
-// One of them has to match if the request is to be considered
-static const char *set_regexp(cmd_parms *cmd, afconf *c, const char *pattern) {
-    return add_regexp_to_array(cmd->pool, &c->arr_rxp, pattern);
 }
 
 static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, const char *fname) {
@@ -338,6 +325,14 @@ static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, cons
 
 static const command_rec cmds[] =
 {
+    AP_INIT_TAKE1(
+        "Fill_RegExp",
+        (cmd_func)set_regexp<afconf>,
+        0, // Self-pass argument
+        ACCESS_CONF, // availability
+        "Regular expression that the URL has to match.  At least one is required."
+    ),
+
     AP_INIT_TAKE12(
         "Fill_Source",
         (cmd_func) set_source<afconf>,
@@ -352,14 +347,6 @@ static const command_rec cmds[] =
         0, // Self-pass argument
         ACCESS_CONF, // availability
         "Source and output configuration files"
-    ),
-
-    AP_INIT_TAKE1(
-        "Fill_RegExp",
-        (cmd_func)set_regexp,
-        0, // Self-pass argument
-        ACCESS_CONF, // availability
-        "Regular expression that the URL has to match.  At least one is required."
     ),
 
     { NULL }

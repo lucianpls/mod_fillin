@@ -36,9 +36,10 @@ struct afconf {
     TiledRaster raster, inraster;
 
     apr_size_t max_input_size;
-    int nearest;  // Defaults to blurred
-    int quality;  // Defaults to 75
-    int strength; // Defaults to 5
+    int skiplevel; // On if this module does back-fill instead of pass-through fill
+    int nearest;   // Defaults to blurred
+    int quality;   // Defaults to 75
+    int strength;  // Defaults to 5
 
     // Set this if only indirect use is allowed
     int indirect;
@@ -164,19 +165,21 @@ static int handler(request_rec* r) {
 
     int code = APR_SUCCESS;
     char* sETag = nullptr;
-    if (tile.l < cfg->inraster.n_levels ) {
-        // Try fetching this input tile
-        code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
-        if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
-            return code;
-        if (sETag)
-            ETag = normalizeETag(sETag);
-    }
+    if (!cfg->skiplevel) {
+        if (tile.l < cfg->inraster.n_levels) {
+            // Try fetching this input tile
+            code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
+            if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
+                return code;
+            if (sETag)
+                ETag = normalizeETag(sETag);
+        }
 
-    // If the input was fine and the etag is not the missing tile, return the image as is
-    if (code == APR_SUCCESS && ETag != cfg->inraster.missing.eTag) {
-        apr_table_setn(r->headers_out, "ETag", ETag.c_str());
-        return sendImage(r, tilebuf);
+        // If the input was fine and the etag is not the missing tile, return the image as is
+        if (code == APR_SUCCESS && ETag != cfg->inraster.missing.eTag) {
+            apr_table_setn(r->headers_out, "ETag", ETag.c_str());
+            return sendImage(r, tilebuf);
+        }
     }
 
     // response was HTTP_NOT_FOUND or it was the missing tile
@@ -338,7 +341,16 @@ static const command_rec cmds[] =
         (cmd_func) set_source<afconf>,
         0,
         ACCESS_CONF,
-        "Required, internal path for the source. Optional suffix also accepted"
+        "Required, internal path for the source. Optional suffix is also accepted."
+    ),
+
+    AP_INIT_TAKE1(
+        "Fill_SkipLevel",
+        (cmd_func) ap_set_flag_slot,
+        (void *)APR_OFFSETOF(afconf, skiplevel),
+        ACCESS_CONF,
+        "Optional, assume that the initial tile requested is missing, request the lower level directly. "
+        "Useful when the this module is set up after the service to be filled in."
     ),
 
     AP_INIT_TAKE2(

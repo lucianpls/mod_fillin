@@ -221,6 +221,7 @@ static int handler(request_rec* r) {
     // decode, oversample and re-encode
     codec_params params;
     memset(&params, 0, sizeof(params));
+    params.dt = cfg->inraster.datatype;
     size_t pixel_size = GDTGetSize(cfg->inraster.datatype);
     size_t input_line_width = pixel_size * 
         cfg->inraster.pagesize.x * cfg->inraster.pagesize.c;

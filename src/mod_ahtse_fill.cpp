@@ -203,15 +203,16 @@ static int handler(request_rec* r) {
             return HTTP_INTERNAL_SERVER_ERROR;
         }
         new_uri = pMLRC(r->pool, new_uri.substr(0, sloc).c_str(), higher_tile);
-    }
-    if (r->args && 0 != strlen(r->args)) {
-        new_uri.append("?");
-        new_uri.append(r->args);
+        if (r->args && 0 != strlen(r->args)) {
+            new_uri.append("?");
+            new_uri.append(r->args);
+        }
     }
 
     sETag = nullptr;
     tilebuf.size = static_cast<int>(cfg->max_input_size);
     code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
+    LOG(r, "Got %d response from %s", code, new_uri.c_str());
     if (APR_SUCCESS != code)
         return code;
     if (tilebuf.size < 4) // Should be minimum image size, 4 is too small

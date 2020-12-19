@@ -219,9 +219,7 @@ static int handler(request_rec* r) {
         return HTTP_NOT_FOUND;
 
     // decode, oversample and re-encode
-    codec_params params;
-    memset(&params, 0, sizeof(params));
-    params.dt = cfg->inraster.datatype;
+    codec_params params(cfg->inraster);
     size_t pixel_size = GDTGetSize(cfg->inraster.datatype);
     size_t input_line_width = pixel_size * 
         cfg->inraster.pagesize.x * cfg->inraster.pagesize.c;
@@ -231,11 +229,9 @@ static int handler(request_rec* r) {
     apr_uint32_t in_format;
     memcpy(&in_format, tilebuf.buffer, 4);
 
-    const char* message = nullptr;
-
     // Double page, to hold the upsampled one also
     auto rawbuf = reinterpret_cast<unsigned char *>(apr_palloc(r->pool, 2 * pagesize));
-    message = stride_decode(params, tilebuf, rawbuf);
+    const char* message = stride_decode(params, tilebuf, rawbuf);
     if (message) { // Got an error from decoding
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "%s decoding %s", message, new_uri.c_str());
         return HTTP_NOT_FOUND;

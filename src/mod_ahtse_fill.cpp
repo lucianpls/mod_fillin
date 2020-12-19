@@ -36,7 +36,7 @@ struct afconf {
     TiledRaster raster, inraster;
 
     apr_size_t max_input_size;
-    int skiplevel; // On if this module does back-fill instead of pass-through fill
+    int backfill; // On if this module does back-fill instead of pass-through fill
     int nearest;   // Defaults to blurred
     int quality;   // Defaults to 75
     int strength;  // Defaults to 5
@@ -165,7 +165,7 @@ static int handler(request_rec* r) {
 
     int code = APR_SUCCESS;
     char* sETag = nullptr;
-    if (!cfg->skiplevel) {
+    if (!cfg->backfill) {
         if (tile.l < cfg->inraster.n_levels) {
             // Try fetching this input tile
             code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
@@ -192,12 +192,18 @@ static int handler(request_rec* r) {
         return sendEmptyTile(r, cfg->raster.missing);
 
     string new_uri(r->unparsed_uri);
-    auto sloc = new_uri.find("/tile/");
-    if (string::npos == sloc) {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Configuration problem, tile path should end with /tile/");
-        return HTTP_INTERNAL_SERVER_ERROR;
+    if (cfg->backfill) {
+        // Don't loop to itself, send the lower res request to the source
+        new_uri = pMLRC(r->pool, cfg->source, higher_tile, cfg->suffix);
     }
-    new_uri = pMLRC(r->pool, new_uri.substr(0, sloc).c_str(), higher_tile);
+    else {
+        auto sloc = new_uri.find("/tile/");
+        if (string::npos == sloc) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Configuration problem, tile path should end with /tile/");
+            return HTTP_INTERNAL_SERVER_ERROR;
+        }
+        new_uri = pMLRC(r->pool, new_uri.substr(0, sloc).c_str(), higher_tile);
+    }
     if (r->args && 0 != strlen(r->args)) {
         new_uri.append("?");
         new_uri.append(r->args);
@@ -345,11 +351,11 @@ static const command_rec cmds[] =
     ),
 
     AP_INIT_TAKE1(
-        "Fill_SkipLevel",
+        "Fill_BackFill",
         (cmd_func) ap_set_flag_slot,
-        (void *)APR_OFFSETOF(afconf, skiplevel),
+        (void *)APR_OFFSETOF(afconf, backfill),
         ACCESS_CONF,
-        "Optional, assume that the initial tile requested is missing, request the lower level directly. "
+        "Optional, assume that the initial tile requested is missing, request the lower level directly from the source. "
         "Useful when the this module is set up after the service to be filled in."
     ),
 

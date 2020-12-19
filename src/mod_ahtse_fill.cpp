@@ -247,8 +247,7 @@ static int handler(request_rec* r) {
 
     // Build output tile in the tilebuf
     jpeg_params cparams;
-    memset(&cparams, 0, sizeof(jpeg_params));
-    cparams.line_stride = static_cast<apr_uint32_t>(input_line_width);
+    set_jpeg_params(cfg->raster, &cparams);
     cparams.quality = cfg->quality;
 
     storage_manager rawmgr(rawbuf + pagesize, pagesize);

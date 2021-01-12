@@ -31,7 +31,7 @@
     </None>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\mod_ahtse_fill.cpp">
+    <ClCompile Include="src\mod_fillin.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

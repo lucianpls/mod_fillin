@@ -17,10 +17,10 @@
 NS_AHTSE_USE
 using namespace std;
 
-extern module AP_MODULE_DECLARE_DATA ahtse_fill_module;
+extern module AP_MODULE_DECLARE_DATA fillin_module;
 
 #if defined(APLOG_USE_MODULE)
-APLOG_USE_MODULE(ahtse_fill);
+APLOG_USE_MODULE(fillin);
 #endif
 
 // compressed tile is 1MB
@@ -136,7 +136,7 @@ static int handler(request_rec* r) {
         return DECLINED;
 
     // The configuration always exists, but still
-    auto cfg = get_conf<afconf>(r, &ahtse_fill_module);
+    auto cfg = get_conf<afconf>(r, &fillin_module);
     if (!cfg || !cfg->source || (cfg->indirect && r->main == nullptr))
         return DECLINED;
     if (!cfg->arr_rxp || !requestMatches(r, cfg->arr_rxp))
@@ -371,7 +371,7 @@ static void register_hooks(apr_pool_t *p) {
     ap_hook_handler(handler, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
-module AP_MODULE_DECLARE_DATA ahtse_fill_module = {
+module AP_MODULE_DECLARE_DATA fillin_module = {
     STANDARD20_MODULE_STUFF,
     create_dir_conf,
     0, // No dir_merge

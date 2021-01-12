@@ -1,4 +1,4 @@
-MODULE = mod_ahtse_fill
+MODULE = mod_fillin
 C_SRC = $(MODULE).cpp
 FILES = $(C_SRC)
 OBJECTS = $(FILES:.cpp=.lo)

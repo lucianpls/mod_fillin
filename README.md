@@ -1,4 +1,4 @@
-# mod_ahtse_fill [AHTSE](https://github.com/lucianpls/AHTSE)
+# mod_fillin [AHTSE](https://github.com/lucianpls/AHTSE)
 
 An AHTSE module that uses lower resolution tiles from the source to 
 generate output tiles which are not in the source. The source should 

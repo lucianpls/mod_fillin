@@ -9,7 +9,8 @@ DEFINES = -DLINUX -D_REENTRANT -D_GNU_SOURCE $(DEBUG)
 # DEST, the folder where the apache module should reside
 # INCLUDES, includes for httpd, apr headers
 
-include Makefile.lcl
+MAKEOPT ?= Makefile.lcl
+include $(MAKEOPT)
 TARGET = .libs/$(MODULE).so
 
 # Can't use apxs to build c++ modules

@@ -15,6 +15,8 @@
 #include <vector>
 
 NS_AHTSE_USE
+NS_ICD_USE
+
 using namespace std;
 
 extern module AP_MODULE_DECLARE_DATA fillin_module;
@@ -142,7 +144,7 @@ static int handler(request_rec* r) {
     if (!cfg->arr_rxp || !requestMatches(r, cfg->arr_rxp))
         return DECLINED;
 
-    sz tile;
+    sz5 tile;
     if (APR_SUCCESS != getMLRC(r, tile) || tile.l >= cfg->raster.n_levels)
         return HTTP_BAD_REQUEST;
 
@@ -184,7 +186,7 @@ static int handler(request_rec* r) {
 
     // response was HTTP_NOT_FOUND or it was the missing tile
     // Request a lower level from this exact path and oversample
-    sz higher_tile = tile;
+    sz5 higher_tile = tile;
     higher_tile.l--;
     higher_tile.x /= 2;
     higher_tile.y /= 2;
@@ -220,7 +222,7 @@ static int handler(request_rec* r) {
 
     // decode, oversample and re-encode
     codec_params params(cfg->inraster);
-    size_t pixel_size = getTypeSize(cfg->inraster.datatype);
+    size_t pixel_size = getTypeSize(cfg->inraster.dt);
     size_t input_line_width = pixel_size * 
         cfg->inraster.pagesize.x * cfg->inraster.pagesize.c;
     size_t pagesize = input_line_width * cfg->inraster.pagesize.y;
@@ -246,8 +248,7 @@ static int handler(request_rec* r) {
         oversample(rawbuf, rawbuf + pagesize, cfg->inraster, right, bottom, 0);
 
     // Build output tile in the tilebuf
-    jpeg_params cparams;
-    set_jpeg_params(cfg->raster, &cparams);
+    jpeg_params cparams(cfg->raster);
     cparams.quality = cfg->quality;
 
     storage_manager rawmgr(rawbuf + pagesize, pagesize);

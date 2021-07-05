@@ -145,7 +145,7 @@ static int handler(request_rec* r) {
         return DECLINED;
 
     sz5 tile;
-    if (APR_SUCCESS != getMLRC(r, tile) || tile.l >= cfg->raster.n_levels)
+    if (APR_SUCCESS != getMLRC(r, tile) || tile.l >= static_cast<size_t>(cfg->raster.n_levels))
         return HTTP_BAD_REQUEST;
 
     if (tile.l < 0)
@@ -153,7 +153,7 @@ static int handler(request_rec* r) {
 
     // Check outside of bounds
     rset* level = cfg->raster.rsets + tile.l;
-    if (tile.x < 0 || tile.y < 0 || tile.x >= level->w || tile.y >= level->h )
+    if (tile.x < 0 || tile.y < 0 || tile.x >= static_cast<size_t>(level->w) || tile.y >= static_cast<size_t>(level->h))
         return HTTP_BAD_REQUEST;
 
     string ETag;
@@ -168,7 +168,7 @@ static int handler(request_rec* r) {
     int code = APR_SUCCESS;
     char* sETag = nullptr;
     if (!cfg->backfill) {
-        if (tile.l < cfg->inraster.n_levels) {
+        if (tile.l < static_cast<size_t>(cfg->inraster.n_levels)) {
             // Try fetching this input tile
             code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
             if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)

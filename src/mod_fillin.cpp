@@ -38,19 +38,13 @@ struct afconf {
     TiledRaster raster, inraster;
 
     apr_size_t max_input_size;
-    int backfill; // On if this module does back-fill instead of pass-through fill
+    int backfill;  // On if this module does back-fill instead of pass-through fill
     int nearest;   // Defaults to blurred
     int quality;   // Defaults to 75
     int strength;  // Defaults to 5
 
     // Set this if only indirect use is allowed
     int indirect;
-};
-
-// TODO: Move this to libahtse, remove from mod_convert also
-static unordered_map<const char*, IMG_T> formats = {
-    {"image/jpeg", IMG_JPEG},
-    {"image/png", IMG_PNG}
 };
 
 static const string normalizeETag(const char* sETag) {
@@ -145,7 +139,7 @@ static int handler(request_rec* r) {
         return DECLINED;
 
     sz5 tile;
-    if (APR_SUCCESS != getMLRC(r, tile) || tile.l >= static_cast<size_t>(cfg->raster.n_levels))
+    if (APR_SUCCESS != getMLRC(r, tile, 1) || tile.l >= static_cast<size_t>(cfg->raster.n_levels))
         return HTTP_BAD_REQUEST;
 
     if (tile.l < 0)
@@ -221,12 +215,11 @@ static int handler(request_rec* r) {
         return HTTP_NOT_FOUND;
 
     // decode, oversample and re-encode
-    codec_params params(cfg->inraster);
-    size_t pixel_size = getTypeSize(cfg->inraster.dt);
-    size_t input_line_width = pixel_size * 
-        cfg->inraster.pagesize.x * cfg->inraster.pagesize.c;
-    size_t pagesize = input_line_width * cfg->inraster.pagesize.y;
-    params.line_stride = static_cast<apr_uint32_t>(input_line_width);
+    auto inr = cfg->inraster;
+    inr.size = inr.pagesize;
+    codec_params params(inr);
+    params.line_stride = static_cast<apr_uint32_t>(getTypeSize(inr.dt) * inr.size.x * inr.size.c);
+    size_t pagesize = inr.size.y * params.line_stride;
 
     apr_uint32_t in_format;
     memcpy(&in_format, tilebuf.buffer, 4);
@@ -248,7 +241,9 @@ static int handler(request_rec* r) {
         oversample(rawbuf, rawbuf + pagesize, cfg->inraster, right, bottom, 0);
 
     // Build output tile in the tilebuf
-    jpeg_params cparams(cfg->raster);
+    auto outr = cfg->raster;
+    outr.size = outr.pagesize;
+    jpeg_params cparams(outr);
     cparams.quality = cfg->quality;
 
     storage_manager rawmgr(rawbuf + pagesize, pagesize);
@@ -345,7 +340,7 @@ static const command_rec cmds[] =
         (cmd_func) set_source<afconf>,
         0,
         ACCESS_CONF,
-        "Required, internal path for the source. Optional suffix is also accepted."
+        "Required, internal path for the source, tile/<MLRC> is added. Optional suffix is also accepted."
     ),
 
     AP_INIT_TAKE1(

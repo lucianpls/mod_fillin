@@ -14,6 +14,10 @@
 #include <apr_md5.h>
 #include <vector>
 
+// For using socache
+#include <ap_provider.h>
+#include <ap_socache.h>
+
 NS_AHTSE_USE
 NS_ICD_USE
 
@@ -34,6 +38,11 @@ struct afconf {
     char* source;
     // source suffix
     char* suffix;
+
+    // socache info, if configured
+    ap_socache_provider_t* soprovider;
+    ap_socache_instance_t* soinstance;
+    ap_socache_hints sohints; // keylen, objsize, expiration_interval
 
     TiledRaster raster, inraster;
 
@@ -127,6 +136,38 @@ static void oversample(T* src, T* dst, const TiledRaster& raster, int right, int
     }
 }
 
+static int is_redirect(int code) {
+    return HTTP_MOVED_PERMANENTLY == code || HTTP_MOVED_TEMPORARILY == code;
+}
+
+// Like get_remote_tile, but follows one redirect if necessary
+// TODO: Move to libahtse
+static int get_remote_tile_with_redirect(request_rec* r, const char* remote, const sloc_t& tile,
+    storage_manager& dst, char** psETag, const char* suffix)
+{
+    auto bufsize = dst.size; // In case we need to reset it
+    int code = get_remote_tile(r, remote, tile, dst, psETag, suffix);
+    if (is_redirect(code)) {
+        // Check that sETag holds a location header. Skip the hostname, which
+        // should be local
+        char* sETag = *psETag;
+        if (sETag && *sETag) {
+            auto slash = ap_strchr(sETag, '/');
+            if (slash) {
+                slash = ap_strchr(slash + 1, '/');
+                if (slash)
+                    slash = ap_strchr(slash + 1, '/'); // Third slash
+            }
+            if (slash) { // Internal path only
+                dst.size = bufsize; // Reset size
+                // Try the second time
+                code = get_response(r, slash, dst, psETag);
+            }
+        }
+    }
+    return code;
+}
+
 static int handler(request_rec* r) {
     if (r->method_number != M_GET)
         return DECLINED;
@@ -152,7 +193,9 @@ static int handler(request_rec* r) {
 
     string ETag;
     storage_manager tilebuf;
-    tilebuf.size = static_cast<int>(cfg->max_input_size);
+    auto bufsz = cfg->max_input_size; // Save it in case of re-use
+
+    tilebuf.size = static_cast<int>(bufsz);
     tilebuf.buffer = static_cast<char*>(apr_palloc(r->pool, tilebuf.size));
     if (!tilebuf.buffer) {
         ap_log_rerror(APLOG_MARK, APLOG_CRIT, 0, r, "Error allocating memory for input tile");
@@ -163,8 +206,13 @@ static int handler(request_rec* r) {
     char* sETag = nullptr;
     if (!cfg->backfill) {
         if (tile.l < static_cast<size_t>(cfg->inraster.n_levels)) {
-            // Try fetching this input tile
-            code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
+            // Try fetching this input tile, following one redirect if necessary
+            code = get_remote_tile_with_redirect(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
+
+            // If we still have a redirect, set the response header
+            if (is_redirect(code) && sETag && *sETag)
+                apr_table_setn(r->headers_out, "Location", sETag);
+
             if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
                 return code;
             if (sETag)
@@ -194,9 +242,12 @@ static int handler(request_rec* r) {
     }
     else {
         auto sloc = new_uri.find("/tile/");
+        // This is a problem in libahtse, the getMRLC should have failed
+        // So this code is just a safeguard
         if (string::npos == sloc) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Configuration problem, tile path should end with /tile/");
-            return HTTP_INTERNAL_SERVER_ERROR;
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "Tile request should include /tile/");
+            return HTTP_BAD_REQUEST;
         }
         new_uri = pMLRC(r->pool, new_uri.substr(0, sloc).c_str(), higher_tile);
         if (r->args && 0 != strlen(r->args)) {
@@ -205,13 +256,54 @@ static int handler(request_rec* r) {
         }
     }
 
-    sETag = nullptr;
-    tilebuf.size = static_cast<int>(cfg->max_input_size);
-    code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
-    LOG(r, "Got %d response from %s", code, new_uri.c_str());
-    if (APR_SUCCESS != code)
+    // If we have a socache, maybe the lower request is already there
+    code = HTTP_NOT_FOUND; // Flag it as failed already
+    // Build the socache key once, to make sure it is unique
+    string socache_key;
+    if (cfg->soinstance) {
+        socache_key = pMLRC(r->pool, "", higher_tile);
+        socache_key = socache_key.substr(6); // Remove "/tile/"
+        apr_size_t keylen = socache_key.size();
+        // socache API wants different types
+        auto objbuf = reinterpret_cast<unsigned char*>(tilebuf.buffer);
+        unsigned size = bufsz;
+        // Returns APR_NOTFOUND if failed, SUCCESS otherwise
+        code = cfg->soprovider->retrieve(cfg->soinstance, r->server, 
+            (unsigned char*)socache_key.c_str(), keylen,
+            (unsigned char*)tilebuf.buffer, &size, r->pool);
+        if (code == APR_SUCCESS) { // Got it
+            tilebuf.size = size;
+            // Should we reset the expiry?
+            LOG(r, "socache hit %s", socache_key.c_str());
+        }
+    }
+
+    if (code != APR_SUCCESS) {
+        // Not in socache, get from remote
+        sETag = nullptr; // Reset etag
+        tilebuf.size = bufsz;
+        code = get_remote_tile_with_redirect(r, new_uri.c_str(), higher_tile, 
+            tilebuf, &sETag, cfg->suffix);
+        LOG(r, "Got %d response from %s", code, new_uri.c_str());
+        if (code == APR_SUCCESS) {
+            apr_size_t keylen = socache_key.size();
+            LOG(r, "socache storing %s", socache_key.c_str());
+            cfg->soprovider->store(cfg->soinstance, r->server,
+                (unsigned char*)socache_key.c_str(), keylen,
+                apr_time_now() + cfg->sohints.expiry_interval,
+                (unsigned char*)tilebuf.buffer, (unsigned)tilebuf.size,
+                r->pool);
+        }
+    }
+
+    if (APR_SUCCESS != code) {
+        // If it's a redirect, pass it up
+        if (is_redirect(code) && sETag && *sETag)
+                apr_table_setn(r->headers_out, "Location", sETag);
         return code;
-    if (tilebuf.size < 4) // Should be minimum image size, 4 is too small
+    }
+
+    if (tilebuf.size < 4) // Should be minimum image size, 4 is way too small
         return HTTP_NOT_FOUND;
 
     // decode, oversample and re-encode
@@ -267,8 +359,33 @@ static int handler(request_rec* r) {
     return sendImage(r, tilebuf);
 }
 
+static const char* set_socachehints(cmd_parms* cmd, afconf* c,
+    const char* keylen, const char* objlen, const char* expiration)
+{
+    // Parse three numbers
+    c->sohints.avg_id_len = apr_atoi64(keylen);
+    c->sohints.avg_obj_size = apr_atoi64(objlen);
+    c->sohints.expiry_interval = apr_atoi64(expiration);
+    // Check the values for sanity
+    if (c->sohints.avg_id_len > 1024)
+        c->sohints.avg_id_len = 1024;
+    // average tile size, between 10k and 1MB
+    if (c->sohints.avg_obj_size > 1024 * 1024)
+        c->sohints.avg_obj_size = 1024 * 1024;
+    if (c->sohints.avg_obj_size < 10 * 1024)
+        c->sohints.avg_obj_size = 10 * 1024;
+    // In microseconds, under 15 minutes
+    if (c->sohints.expiry_interval > 15 * 60 * 1000000)
+        c->sohints.expiry_interval = 15 * 60 * 1000000;
+    return nullptr; // All fine
+}
+
 static void *create_dir_conf(apr_pool_t *p, char *path) {
     auto c = reinterpret_cast<afconf *>(apr_pcalloc(p, sizeof(afconf)));
+    // Set up decent hints for socache
+    c->sohints.avg_id_len = 64; // 64 chars for M/L/R/C
+    c->sohints.avg_obj_size = 16 * 1024; // 16K per tile
+    c->sohints.expiry_interval = 5 * 60 * 1000000; // 5 minutes
     return c;
 }
 
@@ -325,6 +442,48 @@ static const char *read_config(cmd_parms *cmd, afconf  *c, const char *src, cons
     return nullptr;
 }
 
+// Set socache path to use, per configuration
+static const char* set_socache(cmd_parms* cmd, afconf* c, const char* socache) {
+    // From the socache documentation:
+    // 
+    // max of 16 chars, uniquely identifies th consumer of the cache within the server
+    // This string may be used within a file system path, so use only [a-z0-9_-]
+    const char* CACHE_NAME = "FILLIN";
+    const char* err_message;
+    const char* provider_name = AP_SOCACHE_DEFAULT_PROVIDER;
+
+    // Standard format is provider:path, otherwise it is just path
+    // This is pretty fragile, if the name doesn't match the module expectation, it will crash
+    // Example: shmcb:/path/to/datafile(512000)
+    // In that case, it is using a memory mapped file, so the path has to be valid
+    if (ap_strchr(socache, ':')) {
+        provider_name = apr_pstrndup(cmd->temp_pool, socache, ap_strchr(socache, ':') - socache);
+        // Pass the rest to the module itself
+        socache = ap_strchr(socache, ':') + 1;
+    }
+
+    c->soprovider = (ap_socache_provider_t *)
+        ap_lookup_provider(AP_SOCACHE_PROVIDER_GROUP, provider_name, AP_SOCACHE_PROVIDER_VERSION);
+    if (!c->soprovider)
+        return "Can't find the socache provider";
+    // Got the provider, create an instance, the termination is registered with the cmd->pool
+    err_message = c->soprovider->create(&c->soinstance, socache, cmd->temp_pool, cmd->pool);
+    if (err_message)
+        return err_message;
+    // paranoia
+    if (!c->soinstance)
+        return "Can't create the socache session";
+
+    // Do we initialize it here?
+    // The name is max 16 chars, unique for the consumer within the server, although the session 
+    // cache includes a path which can be different within the same server
+    auto status = c->soprovider->init(c->soinstance, CACHE_NAME, &c->sohints, cmd->server, cmd->pool);
+    if (status != APR_SUCCESS)
+        return "Failed to initialize socache, possibly the hints are not suitable";
+
+    return nullptr; // All fine
+}
+
 static const command_rec cmds[] =
 {
     AP_INIT_TAKE1(
@@ -332,7 +491,7 @@ static const command_rec cmds[] =
         (cmd_func)set_regexp<afconf>,
         0, // Self-pass argument
         ACCESS_CONF, // availability
-        "Regular expression that the URL has to match.  At least one is required."
+        "Regular expression that the URL has to match.  At least one is required"
     ),
 
     AP_INIT_TAKE12(
@@ -340,7 +499,7 @@ static const command_rec cmds[] =
         (cmd_func) set_source<afconf>,
         0,
         ACCESS_CONF,
-        "Required, internal path for the source, tile/<MLRC> is added. Optional suffix is also accepted."
+        "Required, internal path for the source, tile/<MLRC> is added. Optional suffix is also accepted"
     ),
 
     AP_INIT_TAKE1(
@@ -349,7 +508,24 @@ static const command_rec cmds[] =
         (void *)APR_OFFSETOF(afconf, backfill),
         ACCESS_CONF,
         "Optional, assume that the initial tile requested is missing, request the lower level directly from the source. "
-        "Useful when the this module is set up after the service to be filled in."
+        "Useful when the this module is set up after the service to be filled in"
+    ),
+
+    AP_INIT_TAKE3(
+        "Fill_SoCacheHints",
+        (cmd_func) set_socachehints,
+        0,
+        ACCESS_CONF,
+        "Optional, requires and needs to be used before Fill_SoCache, takes three numerical arguments\n"
+        "key_size obj_len expiration_time"
+    ),
+    AP_INIT_TAKE1(
+        "Fill_SoCache",
+        (cmd_func) set_socache,
+        0,
+        ACCESS_CONF,
+        "Optional, socache path for caching input tiles. Format is \"provider:arg\"\n"
+        ", see https://httpd.apache.org/docs/2.4/socache.html. Example: \"shmcb:/path/to/datafile(512000)\""
     ),
 
     AP_INIT_TAKE2(

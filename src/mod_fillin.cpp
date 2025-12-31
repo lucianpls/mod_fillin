@@ -140,6 +140,34 @@ static int is_redirect(int code) {
     return HTTP_MOVED_PERMANENTLY == code || HTTP_MOVED_TEMPORARILY == code;
 }
 
+// Like get_remote_tile, but follows one redirect if necessary
+// TODO: Move to libahtse
+static int get_remote_tile_with_redirect(request_rec* r, const char* remote, const sloc_t& tile,
+    storage_manager& dst, char** psETag, const char* suffix)
+{
+    auto bufsize = dst.size; // In case we need to reset it
+    int code = get_remote_tile(r, remote, tile, dst, psETag, suffix);
+    if (is_redirect(code)) {
+        // Check that sETag holds a location header. Skip the hostname, which
+        // should be local
+        char* sETag = *psETag;
+        if (sETag && *sETag) {
+            auto slash = ap_strchr(sETag, '/');
+            if (slash) {
+                slash = ap_strchr(slash + 1, '/');
+                if (slash)
+                    slash = ap_strchr(slash + 1, '/'); // Third slash
+            }
+            if (slash) { // Internal path only
+                dst.size = bufsize; // Reset size
+                // Try the second time
+                code = get_response(r, slash, dst, psETag);
+            }
+        }
+    }
+    return code;
+}
+
 static int handler(request_rec* r) {
     if (r->method_number != M_GET)
         return DECLINED;
@@ -176,28 +204,8 @@ static int handler(request_rec* r) {
     char* sETag = nullptr;
     if (!cfg->backfill) {
         if (tile.l < static_cast<size_t>(cfg->inraster.n_levels)) {
-            // Try fetching this input tile
-            code = get_remote_tile(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
-            // TODO: 
-            // This code should be part of get_remote_tile, with some redirect follow flag
-            // 
-            if (is_redirect(code)) {
-                // Check that sETag holds a location header. Skip the hostname, which
-                // should be local
-                if (sETag && *sETag) {
-                    auto slash = ap_strchr(sETag, '/');
-                    if (slash) {
-                        slash = ap_strchr(slash + 1, '/');
-                        if (slash)
-                            slash = ap_strchr(slash + 1, '/'); // Third slash
-                    }
-                    if (slash) { // Internal path only
-                        tilebuf.size = cfg->max_input_size; // Reset size
-                        // Try the second time
-                        code = get_response(r, slash, tilebuf, &sETag);
-                    }
-                }
-            }
+            // Try fetching this input tile, following one redirect if necessary
+            code = get_remote_tile_with_redirect(r, cfg->source, tile, tilebuf, &sETag, cfg->suffix);
 
             // If we still have a redirect, set the response header
             if (is_redirect(code) && sETag && *sETag)
@@ -305,6 +313,27 @@ static int handler(request_rec* r) {
     return sendImage(r, tilebuf);
 }
 
+static const char* set_socachehints(cmd_parms* cmd, afconf* c,
+    const char* keylen, const char* objlen, const char* expiration)
+{
+    // Parse three numbers
+    c->sohints.avg_id_len = apr_atoi64(keylen);
+    c->sohints.avg_obj_size = apr_atoi64(objlen);
+    c->sohints.expiry_interval = apr_atoi64(expiration);
+    // Check the values for sanity
+    if (c->sohints.avg_id_len > 1024)
+        c->sohints.avg_id_len = 1024;
+    // average tile size, between 10k and 1MB
+    if (c->sohints.avg_obj_size > 1024 * 1024)
+        c->sohints.avg_obj_size = 1024 * 1024;
+    if (c->sohints.avg_obj_size < 10 * 1024)
+        c->sohints.avg_obj_size = 10 * 1024;
+    // In microseconds, under 15 minutes
+    if (c->sohints.expiry_interval > 15 * 60 * 1000000)
+        c->sohints.expiry_interval = 15 * 60 * 1000000;
+    return nullptr; // All fine
+}
+
 static void *create_dir_conf(apr_pool_t *p, char *path) {
     auto c = reinterpret_cast<afconf *>(apr_pcalloc(p, sizeof(afconf)));
     // Set up decent hints for socache
@@ -406,27 +435,6 @@ static const char* set_socache(cmd_parms* cmd, afconf* c, const char* socache) {
     if (status != APR_SUCCESS)
         return "Failed to initialize socache, possibly the hints are not suitable";
 
-    return nullptr; // All fine
-}
-
-static const char* set_socachehints(cmd_parms* cmd, afconf* c,
-    const char* keylen, const char* objlen, const char* expiration)
-{
-    // Parse three numbers
-    c->sohints.avg_id_len = apr_atoi64(keylen);
-    c->sohints.avg_obj_size = apr_atoi64(objlen);
-    c->sohints.expiry_interval = apr_atoi64(expiration);
-    // Check the values for sanity
-    if (c->sohints.avg_id_len > 1024)
-        c->sohints.avg_id_len = 1024;
-    // average tile size, between 10k and 1MB
-    if (c->sohints.avg_obj_size > 1024 * 1024)
-        c->sohints.avg_obj_size = 1024 * 1024;
-    if (c->sohints.avg_obj_size < 10 * 1024)
-        c->sohints.avg_obj_size = 10 * 1024;
-    // In microseconds, under 15 minutes
-    if (c->sohints.expiry_interval > 15 * 60 * 1000000)
-        c->sohints.expiry_interval = 15 * 60 * 1000000;
     return nullptr; // All fine
 }
 

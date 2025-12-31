@@ -8,13 +8,10 @@ HTTP Not Available (404) error, or by matching the source ETag.
 ## Limitatons
 Only 8 bit JPEG input and output are currently supported
 
-## Apache configuration directives, first three are required for operations:
+## Apache configuration directives:
 
 **Fill_RegExp pattern**  
 Can be present more than once, one of the patterns has to match the request URL
-
-**Fill_BackFill On**
-Optional, sends the lower request directly to the source, not to itself. Useful when this module is configured after (on top of) the service to be filled in.
 
 **Fill_ConfigurationFiles SourceConfig Config**  
 The first parameter is the source raster configuration, second one is the ahtse_fill configuration
@@ -22,7 +19,21 @@ The first parameter is the source raster configuration, second one is the ahtse_
 **Fill_Source path**  
 Source for input tiles, an http internal redirect path
 
+**Fill_BackFill On**  
+Optional, sends the lower request directly to the source, not to itself. Useful when this module is 
+configured after (on top of) the service to be filled in
+
+**Fill_SoCache socache_definition**  
+Optional, use the socache defined by the pattern to cache input tiles. This is useful when the source is slow, 
+because the inputs are usually needed for at least four output adjacent tiles. The socache_definition string depends 
+on which socache module is used.
+
+**Fill_SoCacheHints key_size tile_size timeout_in_us**  
+Optional, size hints for socache if defined. Defaults to key_size=64, tile_size=65536, timeout_in_us=600000000 (10 minutes)
+
 ## Directives in both SourceConfig and Config
+Normally the source and output configuration are identical
+
 **Size X Y Z C**  
 Mandatory, size of full resolution raster in pixels, MRF style
 
@@ -37,9 +48,8 @@ Optional, defaults to 0, counted from the top of the MRF pyramid
 
 ## Directives in the SourceConfig only
 **ETagSeed base32_value**  
-
 A 64bit number formatted as a 13 base32 digits [0-9a-v]. In the input file, this exact value will be recognized as the 
-missing tile, in addition to the HTTP NOT AVAILABLE (404) response.
+missing tile, in addition to the HTTP NOT AVAILABLE (404) response
 
 ## Directives in the output configuration only
 

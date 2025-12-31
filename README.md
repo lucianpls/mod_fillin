@@ -13,6 +13,9 @@ Apache configuration directives, all three are required:
 **Fill_RegExp pattern**  
 Can be present more than once, one of the patterns has to match the request URL
 
+**Fill_BackFill On**
+Optional, sends the lower request directly to the source, not to itself. Useful when this module is configured after (on top of) the service to be filled in.
+
 **Fill_ConfigurationFiles SourceConfig Config**  
 The first parameter is the source raster configuration, second one is the ahtse_fill configuration
 
@@ -57,5 +60,5 @@ the full resolution, regardless of how the source behaves
 
 ## Notes
 
-Avoid internal server error due to recursion, by increase the limit from the default value of 10. A value of 25 should be plenty in most cases:  
+Avoid recursion internal server error by increasing the limit from the default value of 10. A value of 25 should be plenty in most cases:  
 `LimitInternalRecursion 25`

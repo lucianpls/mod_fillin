@@ -8,7 +8,7 @@ HTTP Not Available (404) error, or by matching the source ETag.
 ## Limitatons
 Only 8 bit JPEG input and output are currently supported
 
-Apache configuration directives, all three are required:
+## Apache configuration directives, first three are required for operations:
 
 **Fill_RegExp pattern**  
 Can be present more than once, one of the patterns has to match the request URL

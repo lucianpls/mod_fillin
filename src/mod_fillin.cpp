@@ -193,7 +193,9 @@ static int handler(request_rec* r) {
 
     string ETag;
     storage_manager tilebuf;
-    tilebuf.size = static_cast<int>(cfg->max_input_size);
+    auto bufsz = cfg->max_input_size; // Save it in case of re-use
+
+    tilebuf.size = static_cast<int>(bufsz);
     tilebuf.buffer = static_cast<char*>(apr_palloc(r->pool, tilebuf.size));
     if (!tilebuf.buffer) {
         ap_log_rerror(APLOG_MARK, APLOG_CRIT, 0, r, "Error allocating memory for input tile");
@@ -240,9 +242,12 @@ static int handler(request_rec* r) {
     }
     else {
         auto sloc = new_uri.find("/tile/");
+        // This is a problem in libahtse, the getMRLC should have failed
+        // So this code is just a safeguard
         if (string::npos == sloc) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Configuration problem, tile path should end with /tile/");
-            return HTTP_INTERNAL_SERVER_ERROR;
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "Tile request should include /tile/");
+            return HTTP_BAD_REQUEST;
         }
         new_uri = pMLRC(r->pool, new_uri.substr(0, sloc).c_str(), higher_tile);
         if (r->args && 0 != strlen(r->args)) {
@@ -251,13 +256,54 @@ static int handler(request_rec* r) {
         }
     }
 
-    sETag = nullptr;
-    tilebuf.size = static_cast<int>(cfg->max_input_size);
-    code = get_response(r, new_uri.c_str(), tilebuf, &sETag);
-    LOG(r, "Got %d response from %s", code, new_uri.c_str());
-    if (APR_SUCCESS != code)
+    // If we have a socache, maybe the lower request is already there
+    code = HTTP_NOT_FOUND; // Flag it as failed already
+    // Build the socache key once, to make sure it is unique
+    string socache_key;
+    if (cfg->soinstance) {
+        socache_key = pMLRC(r->pool, "", higher_tile);
+        socache_key = socache_key.substr(6); // Remove "/tile/"
+        apr_size_t keylen = socache_key.size();
+        // socache API wants different types
+        auto objbuf = reinterpret_cast<unsigned char*>(tilebuf.buffer);
+        unsigned size = bufsz;
+        // Returns APR_NOTFOUND if failed, SUCCESS otherwise
+        code = cfg->soprovider->retrieve(cfg->soinstance, r->server, 
+            (unsigned char*)socache_key.c_str(), keylen,
+            (unsigned char*)tilebuf.buffer, &size, r->pool);
+        if (code == APR_SUCCESS) { // Got it
+            tilebuf.size = size;
+            // Should we reset the expiry?
+            LOG(r, "socache hit %s", socache_key.c_str());
+        }
+    }
+
+    if (code != APR_SUCCESS) {
+        // Not in socache, get from remote
+        sETag = nullptr; // Reset etag
+        tilebuf.size = bufsz;
+        code = get_remote_tile_with_redirect(r, new_uri.c_str(), higher_tile, 
+            tilebuf, &sETag, cfg->suffix);
+        LOG(r, "Got %d response from %s", code, new_uri.c_str());
+        if (code == APR_SUCCESS) {
+            apr_size_t keylen = socache_key.size();
+            LOG(r, "socache storing %s", socache_key.c_str());
+            cfg->soprovider->store(cfg->soinstance, r->server,
+                (unsigned char*)socache_key.c_str(), keylen,
+                apr_time_now() + cfg->sohints.expiry_interval,
+                (unsigned char*)tilebuf.buffer, (unsigned)tilebuf.size,
+                r->pool);
+        }
+    }
+
+    if (APR_SUCCESS != code) {
+        // If it's a redirect, pass it up
+        if (is_redirect(code) && sETag && *sETag)
+                apr_table_setn(r->headers_out, "Location", sETag);
         return code;
-    if (tilebuf.size < 4) // Should be minimum image size, 4 is too small
+    }
+
+    if (tilebuf.size < 4) // Should be minimum image size, 4 is way too small
         return HTTP_NOT_FOUND;
 
     // decode, oversample and re-encode

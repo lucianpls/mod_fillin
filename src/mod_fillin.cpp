@@ -264,12 +264,10 @@ static int handler(request_rec* r) {
         socache_key = pMLRC(r->pool, "", higher_tile);
         socache_key = socache_key.substr(6); // Remove "/tile/"
         apr_size_t keylen = socache_key.size();
-        // socache API wants different types
-        auto objbuf = reinterpret_cast<unsigned char*>(tilebuf.buffer);
-        unsigned size = bufsz;
-        // Returns APR_NOTFOUND if failed, SUCCESS otherwise
+        auto size = (unsigned)bufsz;
+        // Returns APR_NOTFOUND if failed, APR_SUCCESS otherwise
         code = cfg->soprovider->retrieve(cfg->soinstance, r->server, 
-            (unsigned char*)socache_key.c_str(), keylen,
+            (unsigned char*)socache_key.c_str(), (unsigned)keylen,
             (unsigned char*)tilebuf.buffer, &size, r->pool);
         if (code == APR_SUCCESS) { // Got it
             tilebuf.size = size;
@@ -289,7 +287,7 @@ static int handler(request_rec* r) {
             apr_size_t keylen = socache_key.size();
             LOG(r, "socache storing %s", socache_key.c_str());
             cfg->soprovider->store(cfg->soinstance, r->server,
-                (unsigned char*)socache_key.c_str(), keylen,
+                (unsigned char*)socache_key.c_str(), (unsigned)keylen,
                 apr_time_now() + cfg->sohints.expiry_interval,
                 (unsigned char*)tilebuf.buffer, (unsigned)tilebuf.size,
                 r->pool);

@@ -215,6 +215,7 @@ static int handler(request_rec* r) {
 
             if (code != APR_SUCCESS && code != HTTP_NOT_FOUND)
                 return code;
+            // Standard ETag here, might be needed
             if (sETag)
                 ETag = normalizeETag(sETag);
         }
@@ -283,7 +284,8 @@ static int handler(request_rec* r) {
         code = get_remote_tile_with_redirect(r, new_uri.c_str(), higher_tile, 
             tilebuf, &sETag, cfg->suffix);
         LOG(r, "Got %d response from %s", code, new_uri.c_str());
-        if (code == APR_SUCCESS) {
+        // Stash the input for reuse in the shared cache
+        if (cfg->soinstance && code == APR_SUCCESS) {
             apr_size_t keylen = socache_key.size();
             LOG(r, "socache storing %s", socache_key.c_str());
             cfg->soprovider->store(cfg->soinstance, r->server,

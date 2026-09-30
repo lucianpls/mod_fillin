@@ -17,6 +17,7 @@
 // For using socache
 #include <ap_provider.h>
 #include <ap_socache.h>
+#include <util_mutex.h>
 
 NS_AHTSE_USE
 NS_ICD_USE
@@ -55,6 +56,15 @@ struct afconf {
     // Set this if only indirect use is allowed
     int indirect;
 };
+
+struct server_config {
+    server_rec* s;
+
+    // Global mutex for socache
+    apr_global_mutex_t* mutex;
+};
+
+static const char* fillmutex_type = "fillin_mutex";
 
 static const string normalizeETag(const char* sETag) {
     string result(sETag);
@@ -168,6 +178,43 @@ static int get_remote_tile_with_redirect(request_rec* r, const char* remote, con
     return code;
 }
 
+// There is one global lock per server for this module
+static int so_lock(request_rec* r) {
+    auto sconf = (server_config*)ap_get_module_config(r->server->module_config, &fillin_module);
+    if (!sconf || !sconf->mutex)
+        return HTTP_INTERNAL_SERVER_ERROR; // No mutex, can't lock
+    auto status = apr_global_mutex_lock(sconf->mutex);
+    if (APR_SUCCESS != status) {
+        ap_log_rerror(APLOG_MARK, APLOG_CRIT, status, r, "Can't lock the global mutex");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    return OK;
+}
+
+// May fail if the lock is already held
+static int so_trylock(request_rec* r) {
+    auto sconf = (server_config*)ap_get_module_config(r->server->module_config, &fillin_module);
+    if (!sconf || !sconf->mutex)
+        return HTTP_INTERNAL_SERVER_ERROR; // No mutex, can't lock
+    auto status = apr_global_mutex_trylock(sconf->mutex);
+    // debugging, log the status if it is not OK
+    if (APR_SUCCESS != status)
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, status, r, "trylock the global mutex failed");
+    return status;
+}
+
+static int so_unlock(request_rec* r) {
+    auto sconf = (server_config*)ap_get_module_config(r->server->module_config, &fillin_module);
+    if (!sconf || !sconf->mutex)
+        return HTTP_INTERNAL_SERVER_ERROR; // No mutex, can't unlock
+    auto status = apr_global_mutex_unlock(sconf->mutex);
+    if (APR_SUCCESS != status) {
+        ap_log_rerror(APLOG_MARK, APLOG_CRIT, status, r, "Can't unlock the global mutex");
+        return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    return OK;
+}
+
 static int handler(request_rec* r) {
     if (r->method_number != M_GET)
         return DECLINED;
@@ -266,14 +313,24 @@ static int handler(request_rec* r) {
         socache_key = socache_key.substr(6); // Remove "/tile/"
         apr_size_t keylen = socache_key.size();
         auto size = (unsigned)bufsz;
-        // Returns APR_NOTFOUND if failed, APR_SUCCESS otherwise
-        code = cfg->soprovider->retrieve(cfg->soinstance, r->server, 
-            (unsigned char*)socache_key.c_str(), (unsigned)keylen,
-            (unsigned char*)tilebuf.buffer, &size, r->pool);
-        if (code == APR_SUCCESS) { // Got it
-            tilebuf.size = size;
-            // Should we reset the expiry?
-            LOG(r, "socache hit %s", socache_key.c_str());
+
+        // Try locking, not worth blocking
+        auto status = so_trylock(r);
+        if (APR_SUCCESS == status) {
+            // Returns APR_NOTFOUND if failed, APR_SUCCESS otherwise
+            code = cfg->soprovider->retrieve(cfg->soinstance, r->server,
+                (unsigned char*)socache_key.c_str(), (unsigned)keylen,
+                (unsigned char*)tilebuf.buffer, &size, r->pool);
+            // Unlock it
+            status = so_unlock(r);
+            if (APR_SUCCESS != status)
+                return status;
+
+            if (code == APR_SUCCESS) { // Got it
+                tilebuf.size = size;
+                // Should we reset the expiry?
+                LOG(r, "socache hit %s", socache_key.c_str());
+            }
         }
     }
 
@@ -288,11 +345,18 @@ static int handler(request_rec* r) {
         if (cfg->soinstance && code == APR_SUCCESS) {
             apr_size_t keylen = socache_key.size();
             LOG(r, "socache storing %s", socache_key.c_str());
-            cfg->soprovider->store(cfg->soinstance, r->server,
-                (unsigned char*)socache_key.c_str(), (unsigned)keylen,
-                apr_time_now() + cfg->sohints.expiry_interval,
-                (unsigned char*)tilebuf.buffer, (unsigned)tilebuf.size,
-                r->pool);
+            // Lock it before storing
+            auto status = so_trylock(r);
+            if (APR_SUCCESS == status) {
+                cfg->soprovider->store(cfg->soinstance, r->server,
+                    (unsigned char*)socache_key.c_str(), (unsigned)keylen,
+                    apr_time_now() + cfg->sohints.expiry_interval,
+                    (unsigned char*)tilebuf.buffer, (unsigned)tilebuf.size,
+                    r->pool);
+                status = so_unlock(r);
+                if (APR_SUCCESS != status)
+                    return status;
+            }
         }
     }
 
@@ -386,6 +450,12 @@ static void *create_dir_conf(apr_pool_t *p, char *path) {
     c->sohints.avg_id_len = 64; // 64 chars for M/L/R/C
     c->sohints.avg_obj_size = 16 * 1024; // 16K per tile
     c->sohints.expiry_interval = 5 * 60 * 1000000; // 5 minutes
+    return c;
+}
+
+static void* create_server_conf(apr_pool_t* p, server_rec* s) {
+    auto c = reinterpret_cast<server_config*>(apr_pcalloc(p, sizeof(server_config)));
+    c->s = s;
     return c;
 }
 
@@ -539,15 +609,48 @@ static const command_rec cmds[] =
     { NULL }
 };
 
+// Register the mutex type before the config, so it can be used by the Mutex directive
+static int pre_config(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp) {
+    ap_mutex_register(p, fillmutex_type, NULL, APR_LOCK_DEFAULT, 0);
+    return OK;
+}
+
+// Called after the configuration is read, create a global mutex for the module
+static int post_config(apr_pool_t* p, apr_pool_t* plog, apr_pool_t* ptemp, server_rec* s) {
+    auto scfg = (server_config*)ap_get_module_config(s->module_config, &fillin_module);
+    if (!scfg) return HTTP_INTERNAL_SERVER_ERROR;
+    auto status = ap_global_mutex_create(&scfg->mutex, nullptr ,fillmutex_type, NULL, s, p, 0);
+    if (APR_SUCCESS != status)
+        return HTTP_INTERNAL_SERVER_ERROR; // This is a fatal error, the module can't work without a mutex
+    return OK;
+}
+
+// Called when a child process is created, use it to reinitialize the mutex
+static void child_init(apr_pool_t* p, server_rec* s) {
+    // Nothing to do here, the socache is initialized in the pre_config
+    auto scfg = (server_config*)ap_get_module_config(s->module_config, &fillin_module);
+    auto name = apr_global_mutex_lockfile(scfg->mutex);
+    auto status = apr_global_mutex_child_init(&scfg->mutex, name, p);
+    if (APR_SUCCESS != status) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, status, s, "Failed to reinitialize the %s mutex", name);
+        // This is a fatal error, the module can't work without a mutex
+        // But we can't return an error code at this point
+        exit(1);
+    }
+};
+
 static void register_hooks(apr_pool_t *p) {
     ap_hook_handler(handler, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_pre_config(pre_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_post_config(post_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_hook_child_init(child_init, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
 module AP_MODULE_DECLARE_DATA fillin_module = {
     STANDARD20_MODULE_STUFF,
     create_dir_conf,
     0, // No dir_merge
-    0, // No server_config
+    create_server_conf,
     0, // No server_merge
     cmds, // configuration directives
     register_hooks // processing hooks

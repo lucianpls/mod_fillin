@@ -305,7 +305,7 @@ static int handler(request_rec* r) {
     }
 
     // If we have a socache, maybe the lower request is already there
-    code = HTTP_NOT_FOUND; // Flag it as failed already
+    code = HTTP_NOT_FOUND; // Flag it as not in the cache
     // Build the socache key once, to make sure it is unique
     string socache_key;
     if (cfg->soinstance) {
@@ -318,11 +318,13 @@ static int handler(request_rec* r) {
         auto status = so_trylock(r);
         if (APR_SUCCESS == status) {
             // Returns APR_NOTFOUND if failed, APR_SUCCESS otherwise
+            // Sets the size to the actual size of the object
             code = cfg->soprovider->retrieve(cfg->soinstance, r->server,
                 (unsigned char*)socache_key.c_str(), (unsigned)keylen,
                 (unsigned char*)tilebuf.buffer, &size, r->pool);
             // Unlock it
             status = so_unlock(r);
+            // Never happens
             if (APR_SUCCESS != status)
                 return status;
 
@@ -345,7 +347,7 @@ static int handler(request_rec* r) {
         if (cfg->soinstance && code == APR_SUCCESS) {
             apr_size_t keylen = socache_key.size();
             LOG(r, "socache storing %s", socache_key.c_str());
-            // Lock it before storing
+            // Lock cache before storing
             auto status = so_trylock(r);
             if (APR_SUCCESS == status) {
                 cfg->soprovider->store(cfg->soinstance, r->server,
@@ -354,12 +356,14 @@ static int handler(request_rec* r) {
                     (unsigned char*)tilebuf.buffer, (unsigned)tilebuf.size,
                     r->pool);
                 status = so_unlock(r);
+                // Never happens
                 if (APR_SUCCESS != status)
                     return status;
             }
         }
     }
 
+    // Still a problem, return the error code, maybe a redirect
     if (APR_SUCCESS != code) {
         // If it's a redirect, pass it up
         if (is_redirect(code) && sETag && *sETag)
